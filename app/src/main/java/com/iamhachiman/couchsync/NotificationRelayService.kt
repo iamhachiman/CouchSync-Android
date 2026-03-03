@@ -4,6 +4,10 @@ import android.content.Context
 import android.content.Intent
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.os.Build
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -26,6 +30,7 @@ class NotificationRelayService : NotificationListenerService() {
     private var port: Int = 0
     private var code: String? = null
     private var pingJob: Job? = null
+    private var isRunInBg: Boolean = false
 
     override fun onCreate() {
         super.onCreate()
@@ -38,8 +43,13 @@ class NotificationRelayService : NotificationListenerService() {
         if (intent?.action == "com.iamhachiman.couchsync.CONNECT") {
             loadPrefs()
             connectToServer()
+            updateForegroundState()
         } else if (intent?.action == "com.iamhachiman.couchsync.DISCONNECT") {
+            stopForeground(true)
             disconnect()
+        } else if (intent?.action == "com.iamhachiman.couchsync.UPDATE_BG") {
+            loadPrefs()
+            updateForegroundState()
         }
         return super.onStartCommand(intent, flags, startId)
     }
@@ -56,6 +66,44 @@ class NotificationRelayService : NotificationListenerService() {
         ip = prefs.getString("ip", null)
         port = prefs.getInt("port", 0)
         code = prefs.getString("code", null)
+        isRunInBg = prefs.getBoolean("run_in_background", false)
+    }
+
+    private fun updateForegroundState() {
+        if (isRunInBg && ip != null) {
+            startPersistentForeground()
+        } else {
+            stopForeground(true)
+        }
+    }
+
+    private fun startPersistentForeground() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                "couchsync_bg_channel",
+                "CouchSync Background Service",
+                NotificationManager.IMPORTANCE_LOW
+            )
+            val manager = getSystemService(NotificationManager::class.java)
+            manager?.createNotificationChannel(channel)
+        }
+
+        val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, "couchsync_bg_channel")
+        } else {
+            Notification.Builder(this)
+        }
+            .setContentTitle("CouchSync Connected")
+            .setContentText("Relaying notifications in the background...")
+            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setPriority(Notification.PRIORITY_LOW)
+            .build()
+
+        if (Build.VERSION.SDK_INT >= 29) { // Build.VERSION_CODES.Q
+            startForeground(7531, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else {
+            startForeground(7531, notification)
+        }
     }
 
     private fun disconnect() {

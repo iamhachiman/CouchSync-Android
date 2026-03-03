@@ -12,6 +12,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import android.Manifest
+import android.os.Build
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -45,6 +49,33 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val requestPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted: Boolean ->
+        if (isGranted) {
+            changeRunBg(true)
+        } else {
+            Toast.makeText(this, "Permission denied for background notifications", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun checkAndChangeRunBg(enabled: Boolean) {
+        if (!enabled) {
+            changeRunBg(false)
+            return
+        }
+
+        if (Build.VERSION.SDK_INT >= 33) { // Build.VERSION_CODES.TIRAMISU
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+                changeRunBg(true)
+            } else {
+                requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        } else {
+            changeRunBg(true)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         sharedPrefs = getSharedPreferences("CouchSyncPrefs", Context.MODE_PRIVATE)
@@ -63,6 +94,7 @@ class MainActivity : ComponentActivity() {
                         onPermissionClick = { promptNotificationPermission() },
                         sharedPrefs = sharedPrefs,
                         onSaveManual = { ip, p, c -> savePairingToPrefs(ip, p, c) },
+                        onRunBgChange = { checkAndChangeRunBg(it) },
                         onDisconnect = { disconnectPairing() },
                         isNotificationEnabled = isNotifEnabled.value,
                         onRequestBattery = { promptBatteryOptimization() },
@@ -138,6 +170,14 @@ class MainActivity : ComponentActivity() {
         recreate()
     }
 
+    private fun changeRunBg(enabled: Boolean) {
+        sharedPrefs.edit().putBoolean("run_in_background", enabled).apply()
+        val intent = Intent(this, NotificationRelayService::class.java).apply {
+            action = "com.iamhachiman.couchsync.UPDATE_BG"
+        }
+        startService(intent)
+    }
+
     private fun isNotificationAccessGranted(): Boolean {
         val sets = NotificationManagerCompat.getEnabledListenerPackages(this)
         return sets.contains(packageName)
@@ -171,6 +211,7 @@ fun CouchSyncMainScreen(
     onPermissionClick: () -> Unit,
     sharedPrefs: SharedPreferences,
     onSaveManual: (String, Int, String) -> Unit,
+    onRunBgChange: (Boolean) -> Unit,
     onDisconnect: () -> Unit,
     isNotificationEnabled: Boolean,
     onRequestBattery: () -> Unit,
@@ -179,7 +220,9 @@ fun CouchSyncMainScreen(
     var ipStr by remember { mutableStateOf(sharedPrefs.getString("ip", "") ?: "") }
     var portStr by remember { mutableStateOf((sharedPrefs.getInt("port", 0).takeIf { it != 0 }?.toString() ?: "")) }
     var codeStr by remember { mutableStateOf(sharedPrefs.getString("code", "") ?: "") }
+    var runBgStr by remember { mutableStateOf(sharedPrefs.getBoolean("run_in_background", false)) }
     val isConnected = CouchSyncState.isConnected.value
+    val context = androidx.compose.ui.platform.LocalContext.current
 
     Scaffold(
         topBar = {
@@ -227,7 +270,9 @@ fun CouchSyncMainScreen(
                 }
             }
 
-            if (!isConnected) {
+            val isPaired = ipStr.isNotBlank()
+
+            if (!isPaired) {
                 // Not Connected - Show Pairing Forms
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -311,13 +356,45 @@ fun CouchSyncMainScreen(
                         modifier = Modifier.padding(24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = androidx.compose.ui.graphics.Color(0xFF00FF00), modifier = Modifier.size(64.dp))
-                        Spacer(Modifier.height(16.dp))
-                        Text("Connected", fontWeight = FontWeight.Black, fontSize = 24.sp, color = androidx.compose.ui.graphics.Color(0xFF00FF00))
+                        if (isConnected) {
+                            Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = androidx.compose.ui.graphics.Color(0xFF00FF00), modifier = Modifier.size(64.dp))
+                            Spacer(Modifier.height(16.dp))
+                            Text("Connected", fontWeight = FontWeight.Black, fontSize = 24.sp, color = androidx.compose.ui.graphics.Color(0xFF00FF00))
+                        } else {
+                            Icon(Icons.Filled.Warning, contentDescription = null, tint = androidx.compose.ui.graphics.Color(0xFFFFA500), modifier = Modifier.size(64.dp))
+                            Spacer(Modifier.height(16.dp))
+                            Text("Connecting...", fontWeight = FontWeight.Black, fontSize = 24.sp, color = androidx.compose.ui.graphics.Color(0xFFFFA500))
+                        }
                         Spacer(Modifier.height(8.dp))
                         Text("PC Interface: $ipStr:$portStr", color = androidx.compose.ui.graphics.Color.White)
                         Text("Ready to relay notifications silently inside background.", fontSize = 12.sp, color = androidx.compose.ui.graphics.Color.LightGray, modifier=Modifier.padding(top=4.dp))
                         
+                        Spacer(Modifier.height(16.dp))
+                        
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Run Persistent (Background): ", color = androidx.compose.ui.graphics.Color.White, fontSize = 14.sp)
+                            Switch(
+                                checked = runBgStr,
+                                onCheckedChange = { 
+                                    if (Build.VERSION.SDK_INT >= 33 && it && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                                        // Request will be handled, don't flip immediately
+                                        onRunBgChange(it)
+                                    } else {
+                                        runBgStr = it
+                                        onRunBgChange(it)
+                                    }
+                                },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = androidx.compose.ui.graphics.Color(0xFF00FF00),
+                                    checkedTrackColor = androidx.compose.ui.graphics.Color(0x5500FF00)
+                                )
+                            )
+                        }
+
                         Spacer(Modifier.height(24.dp))
                         Button(
                             onClick = onDisconnect,
