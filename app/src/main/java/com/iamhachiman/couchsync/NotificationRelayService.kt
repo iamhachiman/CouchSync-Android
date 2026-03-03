@@ -151,6 +151,27 @@ class NotificationRelayService : NotificationListenerService() {
 
                 socket = Socket(ip, port)
                 writer = PrintWriter(socket!!.getOutputStream(), true)
+                val reader = java.io.BufferedReader(java.io.InputStreamReader(socket!!.getInputStream()))
+                
+                scope.launch {
+                    try {
+                        while (true) {
+                            val line = reader.readLine() ?: break
+                            val inputJson = JSONObject(line)
+                            val type = inputJson.optString("type")
+                            if (type == "clear_all") {
+                                cancelAllNotifications()
+                            } else if (type == "clear") {
+                                val inKey = inputJson.optString("key")
+                                if (!inKey.isNullOrEmpty()) {
+                                    cancelNotification(inKey)
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
                 
                 // Send pairing request
                 val pairJson = JSONObject().apply {
@@ -212,6 +233,7 @@ class NotificationRelayService : NotificationListenerService() {
                     put("app", appName)
                     put("title", title)
                     put("text", text)
+                    put("key", sbn.key)
                     if (historic) {
                         put("historic", "true")
                     }
@@ -247,6 +269,7 @@ class NotificationRelayService : NotificationListenerService() {
                     put("app", appName)
                     put("title", title)
                     put("text", text)
+                    put("key", sbn.key)
                 }
                 
                 synchronized(this@NotificationRelayService) {
