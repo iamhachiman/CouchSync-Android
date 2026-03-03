@@ -159,8 +159,9 @@ class NotificationRelayService : NotificationListenerService() {
 
             try {
                 val json = JSONObject().apply {
+                    val appName = getAppName(sbn.packageName)
                     put("type", "notification")
-                    put("app", sbn.packageName)
+                    put("app", appName)
                     put("title", title)
                     put("text", text)
                     if (historic) {
@@ -193,8 +194,9 @@ class NotificationRelayService : NotificationListenerService() {
 
             try {
                 val json = JSONObject().apply {
+                    val appName = getAppName(sbn.packageName)
                     put("type", "notification_removed")
-                    put("app", sbn.packageName)
+                    put("app", appName)
                     put("title", title)
                     put("text", text)
                 }
@@ -215,5 +217,15 @@ class NotificationRelayService : NotificationListenerService() {
     override fun onDestroy() {
         super.onDestroy()
         disconnect()
+    }
+
+    private fun getAppName(packageName: String): String {
+        return try {
+            val pm = applicationContext.packageManager
+            val ai = pm.getApplicationInfo(packageName, 0)
+            pm.getApplicationLabel(ai).toString()
+        } catch (e: Exception) {
+            packageName
+        }
     }
 }

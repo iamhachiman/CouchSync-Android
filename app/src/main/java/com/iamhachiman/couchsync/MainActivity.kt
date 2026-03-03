@@ -56,7 +56,7 @@ class MainActivity : ComponentActivity() {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
+                    color = androidx.compose.ui.graphics.Color(0xFF0F0C29) // Deep space color
                 ) {
                     CouchSyncMainScreen(
                         onScanClick = { launchScanner() },
@@ -186,8 +186,8 @@ fun CouchSyncMainScreen(
             TopAppBar(
                 title = { Text("CouchSync \uD83D\uDFE2", fontWeight = FontWeight.Bold) },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                    containerColor = androidx.compose.ui.graphics.Color.Transparent,
+                    titleContentColor = androidx.compose.ui.graphics.Color.White
                 )
             )
         }
@@ -196,6 +196,13 @@ fun CouchSyncMainScreen(
             modifier = Modifier
                 .padding(padding)
                 .fillMaxSize()
+                .background(androidx.compose.ui.graphics.Brush.verticalGradient(
+                    colors = listOf(
+                        androidx.compose.ui.graphics.Color(0xFF0F0C29),
+                        androidx.compose.ui.graphics.Color(0xFF302B63),
+                        androidx.compose.ui.graphics.Color(0xFF24243E)
+                    )
+                ))
                 .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
@@ -225,12 +232,12 @@ fun CouchSyncMainScreen(
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = MaterialTheme.shapes.medium,
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+                    colors = CardDefaults.cardColors(containerColor = androidx.compose.ui.graphics.Color(0x22FFFFFF))
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
-                        Text("Connection Status", fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                        Text("Connection Status", fontWeight = FontWeight.SemiBold, fontSize = 18.sp, color = androidx.compose.ui.graphics.Color.White)
                         Spacer(modifier = Modifier.height(8.dp))
-                        Text("Not Paired", color = MaterialTheme.colorScheme.error)
+                        Text("Not Paired", color = androidx.compose.ui.graphics.Color(0xFFFF6B6B))
                     }
                 }
 
@@ -249,25 +256,37 @@ fun CouchSyncMainScreen(
                 OutlinedTextField(
                     value = ipStr,
                     onValueChange = { ipStr = it },
-                    label = { Text("Windows PC IP Address") },
+                    label = { Text("Windows PC IP Address", color = androidx.compose.ui.graphics.Color.LightGray) },
                     modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = androidx.compose.ui.graphics.Color.White,
+                        unfocusedTextColor = androidx.compose.ui.graphics.Color.White
+                    )
                 )
 
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                     OutlinedTextField(
                         value = portStr,
                         onValueChange = { portStr = it },
-                        label = { Text("Port") },
+                        label = { Text("Port", color = androidx.compose.ui.graphics.Color.LightGray) },
                         modifier = Modifier.weight(1f),
-                        singleLine = true
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = androidx.compose.ui.graphics.Color.White,
+                            unfocusedTextColor = androidx.compose.ui.graphics.Color.White
+                        )
                     )
                     OutlinedTextField(
                         value = codeStr,
                         onValueChange = { codeStr = it },
-                        label = { Text("Pairing Code") },
+                        label = { Text("Pairing Code", color = androidx.compose.ui.graphics.Color.LightGray) },
                         modifier = Modifier.weight(1f),
-                        singleLine = true
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = androidx.compose.ui.graphics.Color.White,
+                            unfocusedTextColor = androidx.compose.ui.graphics.Color.White
+                        )
                     )
                 }
 
@@ -277,27 +296,27 @@ fun CouchSyncMainScreen(
                         onSaveManual(ipStr, p, codeStr)
                     },
                     modifier = Modifier.fillMaxWidth().height(50.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary)
+                    colors = ButtonDefaults.buttonColors(containerColor = androidx.compose.ui.graphics.Color(0xFFEE0979))
                 ) {
-                    Text("SAVE CONNECTION")
+                    Text("SAVE CONNECTION", color = androidx.compose.ui.graphics.Color.White, fontWeight = FontWeight.Bold)
                 }
             } else {
                 // Connected View
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = MaterialTheme.shapes.medium,
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+                    colors = CardDefaults.cardColors(containerColor = androidx.compose.ui.graphics.Color(0x22FFFFFF))
                 ) {
                     Column(
                         modifier = Modifier.padding(24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(64.dp))
+                        Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = androidx.compose.ui.graphics.Color(0xFF00FF00), modifier = Modifier.size(64.dp))
                         Spacer(Modifier.height(16.dp))
-                        Text("Connected", fontWeight = FontWeight.Black, fontSize = 24.sp, color = MaterialTheme.colorScheme.primary)
+                        Text("Connected", fontWeight = FontWeight.Black, fontSize = 24.sp, color = androidx.compose.ui.graphics.Color(0xFF00FF00))
                         Spacer(Modifier.height(8.dp))
-                        Text("PC Interface: $ipStr:$portStr")
-                        Text("Ready to relay notifications silently inside background.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier=Modifier.padding(top=4.dp))
+                        Text("PC Interface: $ipStr:$portStr", color = androidx.compose.ui.graphics.Color.White)
+                        Text("Ready to relay notifications silently inside background.", fontSize = 12.sp, color = androidx.compose.ui.graphics.Color.LightGray, modifier=Modifier.padding(top=4.dp))
                         
                         Spacer(Modifier.height(24.dp))
                         Button(
