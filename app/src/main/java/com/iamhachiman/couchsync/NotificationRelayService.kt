@@ -8,11 +8,14 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.PrintWriter
 import java.net.Socket
@@ -24,13 +27,17 @@ object CouchSyncState {
 class NotificationRelayService : NotificationListenerService() {
     private var socket: Socket? = null
     private var writer: PrintWriter? = null
-    private val scope = CoroutineScope(Dispatchers.IO + Job())
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     
     private var ip: String? = null
     private var port: Int = 0
     private var code: String? = null
     private var pingJob: Job? = null
     private var isRunInBg: Boolean = false
+    @Volatile private var isConnecting: Boolean = false
+    @Volatile private var isListenerBound: Boolean = false
+
+    companion object { private const val TAG = "CS_DEBUG" }
 
     override fun onCreate() {
         super.onCreate()
@@ -56,9 +63,20 @@ class NotificationRelayService : NotificationListenerService() {
 
     override fun onListenerConnected() {
         super.onListenerConnected()
+        isListenerBound = true
+        Log.d(TAG, "onListenerConnected: bound=true, socketOk=${socket?.isConnected == true && socket?.isClosed == false}")
         loadPrefs()
-        connectToServer()
-        syncHistoricNotifications()
+        if (socket?.isConnected == true && socket?.isClosed == false) {
+            scope.launch { syncHistoricNotifications() }
+        } else {
+            connectToServer()
+        }
+    }
+
+    override fun onListenerDisconnected() {
+        super.onListenerDisconnected()
+        Log.d(TAG, "onListenerDisconnected: bound=false")
+        isListenerBound = false
     }
 
     private fun loadPrefs() {
@@ -141,18 +159,31 @@ class NotificationRelayService : NotificationListenerService() {
     }
 
     private fun connectToServer() {
-        if (ip == null || port == 0 || code == null) return
+        if (ip == null || port == 0 || code == null) {
+            Log.d(TAG, "connectToServer: skipped (no prefs)")
+            return
+        }
+        if (isConnecting) {
+            Log.d(TAG, "connectToServer: skipped (already connecting)")
+            return
+        }
 
         scope.launch {
+            if (socket?.isConnected == true && socket?.isClosed == false) {
+                Log.d(TAG, "connectToServer: skipped (already connected)")
+                return@launch
+            }
+            if (isConnecting) return@launch
+            isConnecting = true
+            Log.d(TAG, "connectToServer: attempting $ip:$port, listenerBound=$isListenerBound")
             try {
-                if (socket?.isConnected == true && !socket!!.isClosed) {
-                    return@launch
-                }
-
-                socket = Socket(ip, port)
+                val s = Socket()
+                s.connect(java.net.InetSocketAddress(ip, port), 10_000)
+                socket = s
                 writer = PrintWriter(socket!!.getOutputStream(), true)
                 val reader = java.io.BufferedReader(java.io.InputStreamReader(socket!!.getInputStream()))
-                
+                Log.d(TAG, "connectToServer: TCP connected, sending pair")
+
                 scope.launch {
                     try {
                         while (true) {
@@ -172,8 +203,7 @@ class NotificationRelayService : NotificationListenerService() {
                         e.printStackTrace()
                     }
                 }
-                
-                // Send pairing request
+
                 val pairJson = JSONObject().apply {
                     put("type", "pair")
                     put("code", code)
@@ -181,75 +211,83 @@ class NotificationRelayService : NotificationListenerService() {
                 synchronized(this@NotificationRelayService) {
                     writer?.println(pairJson.toString())
                 }
+                Log.d(TAG, "connectToServer: pair sent, syncing historic...")
 
+                // Run inline — no extra coroutine nesting
                 syncHistoricNotifications()
                 CouchSyncState.isConnected.value = true
+                Log.d(TAG, "connectToServer: done")
             } catch (e: Exception) {
+                Log.e(TAG, "connectToServer: failed — ${e.message}")
                 e.printStackTrace()
                 disconnect()
+            } finally {
+                isConnecting = false
             }
         }
     }
 
-    private fun syncHistoricNotifications() {
-        scope.launch {
-            try {
-                if (socket == null || socket?.isConnected == false || socket?.isClosed == true) return@launch
-                val activeNots = try { activeNotifications } catch (e: Exception) { null }
-                if (activeNots != null) {
-                    for (sbn in activeNots) {
-                        sendNotificationSafe(sbn, historic = true)
-                    }
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+    // suspend — runs inline in the caller's coroutine, no extra nesting
+    private suspend fun syncHistoricNotifications() {
+        if (!isListenerBound) {
+            Log.w(TAG, "syncHistoric: skipped — listener not bound")
+            return
         }
+        val socketOk = socket?.isConnected == true && socket?.isClosed == false
+        if (!socketOk) {
+            Log.w(TAG, "syncHistoric: skipped — socket not ready")
+            return
+        }
+        val activeNots = try { activeNotifications } catch (e: Exception) {
+            Log.e(TAG, "syncHistoric: activeNotifications threw — ${e.message}")
+            null
+        }
+        Log.d(TAG, "syncHistoric: found ${activeNots?.size ?: 0} notifications")
+        activeNots?.forEach { sbn -> sendJsonDirect(sbn, historic = true) }
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        sendNotificationSafe(sbn, historic = false)
+        // Called on main thread — must dispatch to IO
+        scope.launch { sendJsonDirect(sbn, historic = false) }
     }
 
-    private fun sendNotificationSafe(sbn: StatusBarNotification, historic: Boolean) {
+    // Sends a notification JSON directly (must be called from a coroutine/IO context)
+    private fun sendJsonDirect(sbn: StatusBarNotification, historic: Boolean) {
         if (sbn.isOngoing) return
-
         val extras = sbn.notification.extras
         val title = extras.getCharSequence("android.title")?.toString() ?: ""
-        val text = extras.getCharSequence("android.text")?.toString() ?: ""
-
+        val text  = extras.getCharSequence("android.text")?.toString()  ?: ""
         if (title.isBlank() && text.isBlank()) return
 
-        scope.launch {
-            if (socket == null || socket?.isConnected == false || socket?.isClosed == true) {
-                loadPrefs()
-                connectToServer()
-            }
-
-            try {
-                val json = JSONObject().apply {
-                    val appName = getAppName(sbn.packageName)
-                    put("type", "notification")
-                    put("app", appName)
-                    put("title", title)
-                    put("text", text)
-                    put("key", sbn.key)
-                    if (historic) {
-                        put("historic", "true")
-                    }
-                }
-                
-                synchronized(this@NotificationRelayService) {
-                    writer?.println(json.toString())
-                    if (writer?.checkError() == true) {
-                        disconnect()
-                    }
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-                disconnect()
-            }
+        val socketOk = socket?.isConnected == true && socket?.isClosed == false
+        if (!socketOk) {
+            Log.w(TAG, "sendJsonDirect: socket not ready, dropping ${sbn.packageName}")
+            return
         }
+        try {
+            val json = JSONObject().apply {
+                put("type", "notification")
+                put("app",  getAppName(sbn.packageName))
+                put("title", title)
+                put("text",  text)
+                put("key",   sbn.key)
+                if (historic) put("historic", "true")
+            }
+            Log.d(TAG, "sendJsonDirect: sending '${sbn.packageName}' historic=$historic")
+            synchronized(this@NotificationRelayService) {
+                writer?.println(json.toString())
+                if (writer?.checkError() == true) disconnect()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "sendJsonDirect: exception — ${e.message}")
+            e.printStackTrace()
+            disconnect()
+        }
+    }
+
+    @Deprecated("Use sendJsonDirect from a coroutine instead")
+    private fun sendNotificationSafe(sbn: StatusBarNotification, historic: Boolean) {
+        scope.launch { sendJsonDirect(sbn, historic) }
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {

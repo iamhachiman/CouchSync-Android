@@ -5,6 +5,8 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
@@ -157,7 +159,9 @@ class MainActivity : ComponentActivity() {
             action = "com.iamhachiman.couchsync.CONNECT"
         }
         startService(intent)
-        recreate()
+        // Delay recreate so the service has time to connect + sync notifications
+        // before onListenerDisconnected can reset isListenerBound
+        Handler(Looper.getMainLooper()).postDelayed({ recreate() }, 1500)
     }
 
     private fun disconnectPairing() {
