@@ -184,26 +184,7 @@ class NotificationRelayService : NotificationListenerService() {
                 val reader = java.io.BufferedReader(java.io.InputStreamReader(socket!!.getInputStream()))
                 Log.d(TAG, "connectToServer: TCP connected, sending pair")
 
-                scope.launch {
-                    try {
-                        while (true) {
-                            val line = reader.readLine() ?: break
-                            val inputJson = JSONObject(line)
-                            val type = inputJson.optString("type")
-                            if (type == "clear_all") {
-                                cancelAllNotifications()
-                            } else if (type == "clear") {
-                                val inKey = inputJson.optString("key")
-                                if (!inKey.isNullOrEmpty()) {
-                                    cancelNotification(inKey)
-                                }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    }
-                }
-
+                // Send pair FIRST, before starting the reader loop
                 val pairJson = JSONObject().apply {
                     put("type", "pair")
                     put("code", code)
@@ -212,6 +193,32 @@ class NotificationRelayService : NotificationListenerService() {
                     writer?.println(pairJson.toString())
                 }
                 Log.d(TAG, "connectToServer: pair sent, syncing historic...")
+
+                // Start reader AFTER pair is sent — avoids race with empty stream
+                scope.launch {
+                    try {
+                        while (true) {
+                            val line = reader.readLine() ?: break
+                            if (line.isBlank()) continue  // skip empty lines, never pass to JSONObject
+                            val inputJson = JSONObject(line)
+                            val type = inputJson.optString("type")
+                            when (type) {
+                                "paired"    -> Log.d(TAG, "connectToServer: pair acknowledged by server")
+                                "rejected"  -> { Log.w(TAG, "connectToServer: pair rejected — wrong code"); break }
+                                "clear_all" -> cancelAllNotifications()
+                                "clear"     -> {
+                                    val inKey = inputJson.optString("key")
+                                    if (!inKey.isNullOrEmpty()) cancelNotification(inKey)
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    } finally {
+                        disconnect()
+                        CouchSyncState.isConnected.value = false
+                    }
+                }
 
                 // Run inline — no extra coroutine nesting
                 syncHistoricNotifications()
