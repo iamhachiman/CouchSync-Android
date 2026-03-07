@@ -30,6 +30,7 @@ import java.net.Inet4Address
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.nio.charset.StandardCharsets
 import java.util.Collections
 
@@ -314,7 +315,11 @@ class NotificationRelayService : NotificationListenerService() {
             }
 
             return when (JSONObject(line).optString("type")) {
-                "paired" -> HandshakeConnection(attemptSocket, attemptWriter, attemptReader, targetIp)
+                "paired" -> {
+                    // Handshake can use a short timeout, but the live socket should block for data.
+                    attemptSocket.soTimeout = 0
+                    HandshakeConnection(attemptSocket, attemptWriter, attemptReader, targetIp)
+                }
                 "rejected" -> {
                     attemptSocket.close()
                     throw PairRejectedException()
@@ -348,7 +353,11 @@ class NotificationRelayService : NotificationListenerService() {
         readerJob = serviceScope.launch {
             try {
                 while (allowReconnect && isSocketReady()) {
-                    val line = reader.readLine() ?: break
+                    val line = try {
+                        reader.readLine()
+                    } catch (_: SocketTimeoutException) {
+                        continue
+                    } ?: break
                     if (line.isBlank()) {
                         continue
                     }

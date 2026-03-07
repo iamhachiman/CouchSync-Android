@@ -455,7 +455,7 @@ private fun HeroStatusCard(
                 } else {
                     "Scan the QR code on Windows once. After that, CouchSync should reconnect without asking you to save details again."
                 },
-                style = MaterialTheme.typography.headlineSmall,
+                style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onSurface
             )
@@ -619,7 +619,7 @@ private fun TrustedDeviceCard(
             Text("Trusted device", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             Text(
                 text = pairingPrefs.deviceName,
-                style = MaterialTheme.typography.headlineSmall,
+                style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.SemiBold
             )
             Text(
