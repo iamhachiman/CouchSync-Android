@@ -2,10 +2,13 @@ package com.iamhachiman.couchsync.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-val Purple80 = Color(0xFFD0BCFF)
-val PurpleGrey80 = Color(0xFFCCC2DC)
-val Pink80 = Color(0xFFEFB8C8)
-
-val Purple40 = Color(0xFF6650a4)
-val PurpleGrey40 = Color(0xFF625b71)
-val Pink40 = Color(0xFF7D5260)
+val Night = Color(0xFF07111F)
+val NightSurface = Color(0xFF102033)
+val NightSurfaceHigh = Color(0xFF16304A)
+val Mint = Color(0xFF57D18D)
+val MintDark = Color(0xFF1D7B4E)
+val Warm = Color(0xFFF7B955)
+val Coral = Color(0xFFEF6B63)
+val Mist = Color(0xFFD8E5F2)
+val Slate = Color(0xFF8EA2B8)
+val Cloud = Color(0xFFF6FBFF)

@@ -1,9 +1,12 @@
 package com.iamhachiman.couchsync
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -14,34 +17,102 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import android.Manifest
-import android.os.Build
-import android.content.pm.PackageManager
-import androidx.core.content.ContextCompat
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
+import com.iamhachiman.couchsync.ui.theme.CouchSyncTheme
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import org.json.JSONObject
 
+data class PairingPrefs(
+    val ip: String = "",
+    val port: Int = 50505,
+    val code: String = "",
+    val deviceName: String = "Windows PC",
+    val runInBackground: Boolean = false
+) {
+    val isPaired: Boolean
+        get() = ip.isNotBlank() && code.isNotBlank()
+
+    companion object {
+        fun load(sharedPrefs: SharedPreferences): PairingPrefs {
+            val storedPort = sharedPrefs.getInt("port", 50505).takeIf { it > 0 } ?: 50505
+            val runInBackground = if (sharedPrefs.contains("run_in_background")) {
+                sharedPrefs.getBoolean("run_in_background", false)
+            } else {
+                false
+            }
+            return PairingPrefs(
+                ip = sharedPrefs.getString("ip", "").orEmpty(),
+                port = storedPort,
+                code = sharedPrefs.getString("code", "").orEmpty(),
+                deviceName = sharedPrefs.getString("device_name", "Windows PC").orEmpty().ifBlank { "Windows PC" },
+                runInBackground = runInBackground
+            )
+        }
+    }
+}
+
 class MainActivity : ComponentActivity() {
     private lateinit var sharedPrefs: SharedPreferences
-    private var isNotifEnabled = mutableStateOf(false)
-    private var isBattOptimized = mutableStateOf(false)
+    private val isNotifEnabled = mutableStateOf(false)
+    private val isBattOptimized = mutableStateOf(false)
+    private val pairingPrefs = mutableStateOf(PairingPrefs())
+    private val resumeHandler = Handler(Looper.getMainLooper())
+
+    private val sharedPrefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+        pairingPrefs.value = PairingPrefs.load(sharedPrefs)
+    }
 
     private val barcodeLauncher = registerForActivityResult(ScanContract()) { result ->
         if (result.contents != null) {
@@ -56,46 +127,39 @@ class MainActivity : ComponentActivity() {
     ) { isGranted: Boolean ->
         if (isGranted) {
             changeRunBg(true)
+            refreshStates()
         } else {
-            Toast.makeText(this, "Permission denied for background notifications", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun checkAndChangeRunBg(enabled: Boolean) {
-        if (!enabled) {
-            changeRunBg(false)
-            return
-        }
-
-        if (Build.VERSION.SDK_INT >= 33) { // Build.VERSION_CODES.TIRAMISU
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
-                changeRunBg(true)
-            } else {
-                requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            }
-        } else {
-            changeRunBg(true)
+            Toast.makeText(this, "Permission denied for persistent notifications", Toast.LENGTH_SHORT).show()
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         sharedPrefs = getSharedPreferences("CouchSyncPrefs", Context.MODE_PRIVATE)
+        sharedPrefs.registerOnSharedPreferenceChangeListener(sharedPrefsListener)
 
         enableEdgeToEdge()
         refreshStates()
-        
+
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) {
+            val prefs = pairingPrefs.value
+            val isConnected = CouchSyncState.isConnected.value
+            val isConnecting = CouchSyncState.isConnecting.value
+            val statusMessage = CouchSyncState.statusMessage.value
+
+            CouchSyncTheme(darkTheme = true, dynamicColor = false) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
-                    color = androidx.compose.ui.graphics.Color(0xFF0F0C29) // Deep space color
+                    color = MaterialTheme.colorScheme.background
                 ) {
                     CouchSyncMainScreen(
+                        pairingPrefs = prefs,
+                        isConnected = isConnected,
+                        isConnecting = isConnecting,
+                        statusMessage = statusMessage,
                         onScanClick = { launchScanner() },
                         onPermissionClick = { promptNotificationPermission() },
-                        sharedPrefs = sharedPrefs,
-                        onSaveManual = { ip, p, c -> savePairingToPrefs(ip, p, c) },
+                        onSaveManual = { ip, port, code -> savePairingToPrefs(ip, port, code, prefs.deviceName) },
                         onRunBgChange = { checkAndChangeRunBg(it) },
                         onDisconnect = { disconnectPairing() },
                         isNotificationEnabled = isNotifEnabled.value,
@@ -110,17 +174,25 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         refreshStates()
+        resumeHandler.postDelayed({ refreshStates() }, 350)
+    }
+
+    override fun onDestroy() {
+        resumeHandler.removeCallbacksAndMessages(null)
+        sharedPrefs.unregisterOnSharedPreferenceChangeListener(sharedPrefsListener)
+        super.onDestroy()
     }
 
     private fun refreshStates() {
         isNotifEnabled.value = isNotificationAccessGranted()
         isBattOptimized.value = isBatteryOptimized()
+        pairingPrefs.value = PairingPrefs.load(sharedPrefs)
     }
 
     private fun launchScanner() {
         val options = ScanOptions().apply {
             setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-            setPrompt("Scan PC CouchSync QR Code")
+            setPrompt("Scan your PC's CouchSync code")
             setBeepEnabled(true)
             setOrientationLocked(false)
             setBarcodeImageEnabled(false)
@@ -132,88 +204,116 @@ class MainActivity : ComponentActivity() {
         try {
             val json = JSONObject(jsonText)
             val ip = json.getString("ip")
-            val port = json.getInt("port")
+            val port = json.optInt("port", 50505)
             val code = json.getString("code")
+            val deviceName = json.optString("deviceName", "Windows PC")
 
-            savePairingToPrefs(ip, port, code)
-            Toast.makeText(this, "Paired to $ip successfully!", Toast.LENGTH_LONG).show()
+            savePairingToPrefs(ip, port, code, deviceName)
+            Toast.makeText(this, "Connecting to $deviceName", Toast.LENGTH_LONG).show()
 
             if (!isNotificationAccessGranted()) {
                 promptNotificationPermission()
             }
-        } catch (e: Exception) {
-            Toast.makeText(this, "Invalid QR Code format", Toast.LENGTH_SHORT).show()
-            e.printStackTrace()
+        } catch (_: Exception) {
+            Toast.makeText(this, "Invalid QR code", Toast.LENGTH_SHORT).show()
         }
     }
 
-    private fun savePairingToPrefs(ip: String, port: Int, code: String) {
+    private fun savePairingToPrefs(ip: String, port: Int, code: String, deviceName: String) {
+        val cleanIp = ip.trim()
+        val cleanCode = code.trim()
+        if (cleanIp.isBlank() || cleanCode.isBlank()) {
+            Toast.makeText(this, "IP address and pairing code are required", Toast.LENGTH_SHORT).show()
+            return
+        }
+
         sharedPrefs.edit().apply {
-            putString("ip", ip)
-            putInt("port", port)
-            putString("code", code)
+            putString("ip", cleanIp)
+            putInt("port", port.coerceIn(1, 65535))
+            putString("code", cleanCode)
+            putString("device_name", deviceName.ifBlank { "Windows PC" })
             apply()
         }
-        
-        val intent = Intent(this, NotificationRelayService::class.java).apply {
+
+        pairingPrefs.value = PairingPrefs.load(sharedPrefs)
+        CouchSyncState.statusMessage.value = "Connecting to ${deviceName.ifBlank { cleanIp }}"
+
+        startService(Intent(this, NotificationRelayService::class.java).apply {
             action = "com.iamhachiman.couchsync.CONNECT"
-        }
-        startService(intent)
-        // Delay recreate so the service has time to connect + sync notifications
-        // before onListenerDisconnected can reset isListenerBound
-        Handler(Looper.getMainLooper()).postDelayed({ recreate() }, 1500)
+        })
     }
 
     private fun disconnectPairing() {
-        sharedPrefs.edit().clear().apply()
-        // Stop the service from relaying
-        val intent = Intent(this, NotificationRelayService::class.java).apply {
-            action = "com.iamhachiman.couchsync.DISCONNECT"
+        sharedPrefs.edit().apply {
+            remove("ip")
+            remove("port")
+            remove("code")
+            remove("device_name")
+            apply()
         }
-        startService(intent)
-        recreate()
+        pairingPrefs.value = PairingPrefs.load(sharedPrefs)
+        startService(Intent(this, NotificationRelayService::class.java).apply {
+            action = "com.iamhachiman.couchsync.DISCONNECT"
+        })
     }
 
     private fun changeRunBg(enabled: Boolean) {
         sharedPrefs.edit().putBoolean("run_in_background", enabled).apply()
-        val intent = Intent(this, NotificationRelayService::class.java).apply {
+        pairingPrefs.value = PairingPrefs.load(sharedPrefs)
+        startService(Intent(this, NotificationRelayService::class.java).apply {
             action = "com.iamhachiman.couchsync.UPDATE_BG"
+        })
+    }
+
+    private fun checkAndChangeRunBg(enabled: Boolean) {
+        if (!enabled) {
+            changeRunBg(false)
+            return
         }
-        startService(intent)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            return
+        }
+
+        changeRunBg(true)
     }
 
     private fun isNotificationAccessGranted(): Boolean {
-        val sets = NotificationManagerCompat.getEnabledListenerPackages(this)
-        return sets.contains(packageName)
+        return NotificationManagerCompat.getEnabledListenerPackages(this).contains(packageName)
     }
 
     private fun isBatteryOptimized(): Boolean {
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        return !pm.isIgnoringBatteryOptimizations(packageName)
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        return !powerManager.isIgnoringBatteryOptimizations(packageName)
     }
 
     private fun promptNotificationPermission() {
         if (!isNotificationAccessGranted()) {
             startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
         } else {
-            Toast.makeText(this, "Permission already granted!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Notification access is already enabled", Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun promptBatteryOptimization() {
-        val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+        startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
             data = Uri.parse("package:$packageName")
-        }
-        startActivity(intent)
+        })
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CouchSyncMainScreen(
+    pairingPrefs: PairingPrefs,
+    isConnected: Boolean,
+    isConnecting: Boolean,
+    statusMessage: String,
     onScanClick: () -> Unit,
     onPermissionClick: () -> Unit,
-    sharedPrefs: SharedPreferences,
     onSaveManual: (String, Int, String) -> Unit,
     onRunBgChange: (Boolean) -> Unit,
     onDisconnect: () -> Unit,
@@ -221,213 +321,364 @@ fun CouchSyncMainScreen(
     onRequestBattery: () -> Unit,
     isBatteryOptimized: Boolean
 ) {
-    var ipStr by remember { mutableStateOf(sharedPrefs.getString("ip", "") ?: "") }
-    var portStr by remember { mutableStateOf((sharedPrefs.getInt("port", 0).takeIf { it != 0 }?.toString() ?: "")) }
-    var codeStr by remember { mutableStateOf(sharedPrefs.getString("code", "") ?: "") }
-    var runBgStr by remember { mutableStateOf(sharedPrefs.getBoolean("run_in_background", false)) }
-    val isConnected = CouchSyncState.isConnected.value
-    val context = androidx.compose.ui.platform.LocalContext.current
+    var ipInput by remember(pairingPrefs.ip, pairingPrefs.isPaired) { mutableStateOf(pairingPrefs.ip) }
+    var portInput by remember(pairingPrefs.port, pairingPrefs.isPaired) { mutableStateOf(pairingPrefs.port.toString()) }
+    var codeInput by remember(pairingPrefs.code, pairingPrefs.isPaired) { mutableStateOf(pairingPrefs.code) }
+    val statusColor = when {
+        isConnected -> Color(0xFF57D18D)
+        isConnecting || pairingPrefs.isPaired -> Color(0xFFF7B955)
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("CouchSync \uD83D\uDFE2", fontWeight = FontWeight.Bold) },
+                title = {
+                    Column {
+                        Text("CouchSync", fontWeight = FontWeight.Bold)
+                        Text(
+                            text = "Persistent phone-to-PC relay",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = androidx.compose.ui.graphics.Color.Transparent,
-                    titleContentColor = androidx.compose.ui.graphics.Color.White
+                    containerColor = Color.Transparent,
+                    titleContentColor = MaterialTheme.colorScheme.onBackground
                 )
             )
-        }
+        },
+        containerColor = Color.Transparent
     ) { padding ->
         Column(
             modifier = Modifier
-                .padding(padding)
                 .fillMaxSize()
-                .background(androidx.compose.ui.graphics.Brush.verticalGradient(
-                    colors = listOf(
-                        androidx.compose.ui.graphics.Color(0xFF0F0C29),
-                        androidx.compose.ui.graphics.Color(0xFF302B63),
-                        androidx.compose.ui.graphics.Color(0xFF24243E)
-                    )
-                ))
-                .padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            
-            if (isBatteryOptimized) {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error)
-                            Spacer(Modifier.width(8.dp))
-                            Text("Background Restricted", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.error)
-                        }
-                        Text("Allow CouchSync to run in background to keep connection alive.", fontSize = 12.sp, modifier = Modifier.padding(top=4.dp, bottom=8.dp))
-                        Button(onClick = onRequestBattery, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) {
-                            Text("FIX NOW")
-                        }
-                    }
-                }
-            }
-
-            val isPaired = ipStr.isNotBlank()
-
-            if (!isPaired) {
-                // Not Connected - Show Pairing Forms
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = MaterialTheme.shapes.medium,
-                    colors = CardDefaults.cardColors(containerColor = androidx.compose.ui.graphics.Color(0x22FFFFFF))
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text("Connection Status", fontWeight = FontWeight.SemiBold, fontSize = 18.sp, color = androidx.compose.ui.graphics.Color.White)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text("Not Paired", color = androidx.compose.ui.graphics.Color(0xFFFF6B6B))
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Button(
-                    onClick = onScanClick,
-                    modifier = Modifier.fillMaxWidth().height(56.dp),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Text("SCAN QR CODE TO PAIR", fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                }
-
-                Text("— OR ENTER MANUALLY —", color = MaterialTheme.colorScheme.onSurfaceVariant)
-
-                OutlinedTextField(
-                    value = ipStr,
-                    onValueChange = { ipStr = it },
-                    label = { Text("Windows PC IP Address", color = androidx.compose.ui.graphics.Color.LightGray) },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = androidx.compose.ui.graphics.Color.White,
-                        unfocusedTextColor = androidx.compose.ui.graphics.Color.White
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            MaterialTheme.colorScheme.background,
+                            MaterialTheme.colorScheme.surface,
+                            MaterialTheme.colorScheme.background
+                        )
                     )
                 )
+                .padding(padding)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            HeroStatusCard(
+                isPaired = pairingPrefs.isPaired,
+                isConnected = isConnected,
+                statusMessage = statusMessage,
+                statusColor = statusColor,
+                deviceName = pairingPrefs.deviceName
+            )
 
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    OutlinedTextField(
-                        value = portStr,
-                        onValueChange = { portStr = it },
-                        label = { Text("Port", color = androidx.compose.ui.graphics.Color.LightGray) },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = androidx.compose.ui.graphics.Color.White,
-                            unfocusedTextColor = androidx.compose.ui.graphics.Color.White
-                        )
-                    )
-                    OutlinedTextField(
-                        value = codeStr,
-                        onValueChange = { codeStr = it },
-                        label = { Text("Pairing Code", color = androidx.compose.ui.graphics.Color.LightGray) },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = androidx.compose.ui.graphics.Color.White,
-                            unfocusedTextColor = androidx.compose.ui.graphics.Color.White
-                        )
-                    )
-                }
+            SetupChecklistCard(
+                isNotificationEnabled = isNotificationEnabled,
+                isBatteryOptimized = isBatteryOptimized,
+                isPaired = pairingPrefs.isPaired,
+                onPermissionClick = onPermissionClick,
+                onRequestBattery = onRequestBattery
+            )
 
-                Button(
-                    onClick = {
-                        val p = portStr.toIntOrNull() ?: 50505
-                        onSaveManual(ipStr, p, codeStr)
-                    },
-                    modifier = Modifier.fillMaxWidth().height(50.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = androidx.compose.ui.graphics.Color(0xFFEE0979))
-                ) {
-                    Text("SAVE CONNECTION", color = androidx.compose.ui.graphics.Color.White, fontWeight = FontWeight.Bold)
-                }
-            } else {
-                // Connected View
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = MaterialTheme.shapes.medium,
-                    colors = CardDefaults.cardColors(containerColor = androidx.compose.ui.graphics.Color(0x22FFFFFF))
-                ) {
-                    Column(
-                        modifier = Modifier.padding(24.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        if (isConnected) {
-                            Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = androidx.compose.ui.graphics.Color(0xFF00FF00), modifier = Modifier.size(64.dp))
-                            Spacer(Modifier.height(16.dp))
-                            Text("Connected", fontWeight = FontWeight.Black, fontSize = 24.sp, color = androidx.compose.ui.graphics.Color(0xFF00FF00))
-                        } else {
-                            Icon(Icons.Filled.Warning, contentDescription = null, tint = androidx.compose.ui.graphics.Color(0xFFFFA500), modifier = Modifier.size(64.dp))
-                            Spacer(Modifier.height(16.dp))
-                            Text("Connecting...", fontWeight = FontWeight.Black, fontSize = 24.sp, color = androidx.compose.ui.graphics.Color(0xFFFFA500))
-                        }
-                        Spacer(Modifier.height(8.dp))
-                        Text("PC Interface: $ipStr:$portStr", color = androidx.compose.ui.graphics.Color.White)
-                        Text("Ready to relay notifications silently inside background.", fontSize = 12.sp, color = androidx.compose.ui.graphics.Color.LightGray, modifier=Modifier.padding(top=4.dp))
-                        
-                        Spacer(Modifier.height(16.dp))
-                        
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("Run Persistent (Background): ", color = androidx.compose.ui.graphics.Color.White, fontSize = 14.sp)
-                            Switch(
-                                checked = runBgStr,
-                                onCheckedChange = { 
-                                    if (Build.VERSION.SDK_INT >= 33 && it && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                                        // Request will be handled, don't flip immediately
-                                        onRunBgChange(it)
-                                    } else {
-                                        runBgStr = it
-                                        onRunBgChange(it)
-                                    }
-                                },
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = androidx.compose.ui.graphics.Color(0xFF00FF00),
-                                    checkedTrackColor = androidx.compose.ui.graphics.Color(0x5500FF00)
-                                )
-                            )
-                        }
-
-                        Spacer(Modifier.height(24.dp))
-                        Button(
-                            onClick = onDisconnect,
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                        ) {
-                            Text("DISCONNECT")
-                        }
+            if (!pairingPrefs.isPaired) {
+                PairingCard(
+                    ipInput = ipInput,
+                    onIpChange = { ipInput = it },
+                    portInput = portInput,
+                    onPortChange = { portInput = it },
+                    codeInput = codeInput,
+                    onCodeChange = { codeInput = it },
+                    onScanClick = onScanClick,
+                    onSaveManual = {
+                        onSaveManual(ipInput, portInput.toIntOrNull() ?: 50505, codeInput)
                     }
-                }
+                )
+            } else {
+                TrustedDeviceCard(
+                    pairingPrefs = pairingPrefs,
+                    isConnected = isConnected,
+                    onRunBgChange = onRunBgChange,
+                    onDisconnect = onDisconnect
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HeroStatusCard(
+    isPaired: Boolean,
+    isConnected: Boolean,
+    statusMessage: String,
+    statusColor: Color,
+    deviceName: String
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(28.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
+    ) {
+        Column(modifier = Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(14.dp)
+                        .background(statusColor, CircleShape)
+                )
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    text = when {
+                        isConnected -> "Live connection"
+                        isPaired -> "Reconnecting automatically"
+                        else -> "Ready to pair"
+                    },
+                    fontWeight = FontWeight.SemiBold,
+                    color = statusColor
+                )
+            }
+            Text(
+                text = if (isPaired) {
+                    "Your phone stays linked to $deviceName and reconnects as soon as it can reach your PC."
+                } else {
+                    "Scan the QR code on Windows once. After that, CouchSync should reconnect without asking you to save details again."
+                },
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                text = statusMessage.ifBlank { "Waiting for the next step" },
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                lineHeight = 20.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun SetupChecklistCard(
+    isNotificationEnabled: Boolean,
+    isBatteryOptimized: Boolean,
+    isPaired: Boolean,
+    onPermissionClick: () -> Unit,
+    onRequestBattery: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
+    ) {
+        Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Text("Setup health", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            ChecklistRow(
+                title = "Notification access",
+                subtitle = if (isNotificationEnabled) "Live and reactive" else "Required to mirror alerts in real time",
+                isDone = isNotificationEnabled,
+                actionLabel = if (isNotificationEnabled) null else "Enable",
+                onAction = if (isNotificationEnabled) null else onPermissionClick
+            )
+            ChecklistRow(
+                title = "Battery settings",
+                subtitle = if (isBatteryOptimized) "Android may stop the relay in the background" else "Background relay should stay alive",
+                isDone = !isBatteryOptimized,
+                actionLabel = if (isBatteryOptimized) "Allow" else null,
+                onAction = if (isBatteryOptimized) onRequestBattery else null
+            )
+            ChecklistRow(
+                title = "Trusted PC",
+                subtitle = if (isPaired) "Saved and ready for direct reconnect" else "Scan the Windows QR code to finish pairing",
+                isDone = isPaired,
+                actionLabel = null,
+                onAction = null
+            )
+        }
+    }
+}
+
+@Composable
+private fun ChecklistRow(
+    title: String,
+    subtitle: String,
+    isDone: Boolean,
+    actionLabel: String?,
+    onAction: (() -> Unit)?
+) {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Icon(
+            imageVector = if (isDone) Icons.Filled.CheckCircle else Icons.Filled.Warning,
+            contentDescription = null,
+            tint = if (isDone) Color(0xFF57D18D) else Color(0xFFF7B955)
+        )
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, fontWeight = FontWeight.SemiBold)
+            Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+        }
+        if (actionLabel != null && onAction != null) {
+            OutlinedButton(onClick = onAction, shape = RoundedCornerShape(14.dp)) {
+                Text(actionLabel)
+            }
+        }
+    }
+}
+
+@Composable
+private fun PairingCard(
+    ipInput: String,
+    onIpChange: (String) -> Unit,
+    portInput: String,
+    onPortChange: (String) -> Unit,
+    codeInput: String,
+    onCodeChange: (String) -> Unit,
+    onScanClick: () -> Unit,
+    onSaveManual: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(28.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
+    ) {
+        Column(modifier = Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text("Connect your PC", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text(
+                "The fastest path is QR pairing. Manual entry is only there as a fallback.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Button(
+                onClick = onScanClick,
+                modifier = Modifier.fillMaxWidth().height(56.dp),
+                shape = RoundedCornerShape(18.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+            ) {
+                Text("Scan Windows QR code", fontWeight = FontWeight.Bold)
             }
 
-            Spacer(modifier = Modifier.weight(1f))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
 
-            if (!isNotificationEnabled) {
-                OutlinedButton(
-                    onClick = onPermissionClick,
-                    modifier = Modifier.fillMaxWidth().height(50.dp)
+            Text("Manual connection", fontWeight = FontWeight.SemiBold)
+            OutlinedTextField(
+                value = ipInput,
+                onValueChange = onIpChange,
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("PC IP address") }
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
+                OutlinedTextField(
+                    value = portInput,
+                    onValueChange = onPortChange,
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                    label = { Text("Port") }
+                )
+                OutlinedTextField(
+                    value = codeInput,
+                    onValueChange = onCodeChange,
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                    label = { Text("Pairing code") }
+                )
+            }
+            OutlinedButton(
+                onClick = onSaveManual,
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+                shape = RoundedCornerShape(18.dp)
+            ) {
+                Text("Connect manually")
+            }
+        }
+    }
+}
+
+@Composable
+private fun TrustedDeviceCard(
+    pairingPrefs: PairingPrefs,
+    isConnected: Boolean,
+    onRunBgChange: (Boolean) -> Unit,
+    onDisconnect: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(28.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh)
+    ) {
+        Column(modifier = Modifier.padding(22.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+            Text("Trusted device", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text(
+                text = pairingPrefs.deviceName,
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "${pairingPrefs.ip}:${pairingPrefs.port}",
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Keep relay alive", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        if (pairingPrefs.runInBackground) {
+                            "Foreground relay is enabled for better persistence."
+                        } else {
+                            "Enable this if Android keeps pausing the service."
+                        },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 13.sp
+                    )
+                }
+                Spacer(Modifier.width(16.dp))
+                Switch(
+                    checked = pairingPrefs.runInBackground,
+                    onCheckedChange = onRunBgChange,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.White,
+                        checkedTrackColor = MaterialTheme.colorScheme.primary
+                    )
+                )
+            }
+            Card(
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (isConnected) Color(0x1622C55E) else Color(0x16F59E0B)
+                )
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(Icons.Filled.Settings, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Enable Notification Access")
+                    Icon(
+                        imageVector = if (isConnected) Icons.Filled.CheckCircle else Icons.Filled.Info,
+                        contentDescription = null,
+                        tint = if (isConnected) Color(0xFF22C55E) else Color(0xFFF59E0B)
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        if (isConnected) {
+                            "Notifications are syncing live."
+                        } else {
+                            "The app is keeping this device trusted and will reconnect automatically."
+                        },
+                        color = MaterialTheme.colorScheme.onSurface,
+                        lineHeight = 20.sp
+                    )
                 }
-                Text("Required for CouchSync to capture notifications.", fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
-            } else {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Notification Access Granted", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
-                }
+            }
+            Button(
+                onClick = onDisconnect,
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+                shape = RoundedCornerShape(18.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+            ) {
+                Text("Forget this PC", fontWeight = FontWeight.Bold)
             }
         }
     }
