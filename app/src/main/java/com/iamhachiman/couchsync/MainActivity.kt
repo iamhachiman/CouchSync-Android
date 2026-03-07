@@ -70,6 +70,9 @@ import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.iamhachiman.couchsync.ui.theme.CouchSyncTheme
+import com.iamhachiman.couchsync.ui.theme.Coral
+import com.iamhachiman.couchsync.ui.theme.Mint
+import com.iamhachiman.couchsync.ui.theme.Warm
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import org.json.JSONObject
@@ -299,6 +302,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun promptBatteryOptimization() {
+        refreshStates()
+        if (!isBattOptimized.value) {
+            Toast.makeText(this, "Background protection is already enabled", Toast.LENGTH_SHORT).show()
+            return
+        }
         startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
             data = Uri.parse("package:$packageName")
         })
@@ -325,8 +333,8 @@ fun CouchSyncMainScreen(
     var portInput by remember(pairingPrefs.port, pairingPrefs.isPaired) { mutableStateOf(pairingPrefs.port.toString()) }
     var codeInput by remember(pairingPrefs.code, pairingPrefs.isPaired) { mutableStateOf(pairingPrefs.code) }
     val statusColor = when {
-        isConnected -> Color(0xFF57D18D)
-        isConnecting || pairingPrefs.isPaired -> Color(0xFFF7B955)
+        isConnected -> Mint
+        isConnecting || pairingPrefs.isPaired -> Warm
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
 
@@ -483,10 +491,10 @@ private fun SetupChecklistCard(
                 onAction = if (isNotificationEnabled) null else onPermissionClick
             )
             ChecklistRow(
-                title = "Battery settings",
-                subtitle = if (isBatteryOptimized) "Android may stop the relay in the background" else "Background relay should stay alive",
+                title = "Background protection",
+                subtitle = if (isBatteryOptimized) "This phone can still pause CouchSync in the background" else "No background restriction detected",
                 isDone = !isBatteryOptimized,
-                actionLabel = if (isBatteryOptimized) "Allow" else null,
+                actionLabel = if (isBatteryOptimized) "Fix" else null,
                 onAction = if (isBatteryOptimized) onRequestBattery else null
             )
             ChecklistRow(
@@ -512,7 +520,7 @@ private fun ChecklistRow(
         Icon(
             imageVector = if (isDone) Icons.Filled.CheckCircle else Icons.Filled.Warning,
             contentDescription = null,
-            tint = if (isDone) Color(0xFF57D18D) else Color(0xFFF7B955)
+            tint = if (isDone) Mint else Warm
         )
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
@@ -629,7 +637,7 @@ private fun TrustedDeviceCard(
                         if (pairingPrefs.runInBackground) {
                             "Foreground relay is enabled for better persistence."
                         } else {
-                            "Enable this if Android keeps pausing the service."
+                            "Enable this only if Android keeps pausing the service."
                         },
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 13.sp
@@ -648,7 +656,7 @@ private fun TrustedDeviceCard(
             Card(
                 shape = RoundedCornerShape(20.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = if (isConnected) Color(0x1622C55E) else Color(0x16F59E0B)
+                    containerColor = if (isConnected) Mint.copy(alpha = 0.14f) else Warm.copy(alpha = 0.14f)
                 )
             ) {
                 Row(
@@ -658,7 +666,7 @@ private fun TrustedDeviceCard(
                     Icon(
                         imageVector = if (isConnected) Icons.Filled.CheckCircle else Icons.Filled.Info,
                         contentDescription = null,
-                        tint = if (isConnected) Color(0xFF22C55E) else Color(0xFFF59E0B)
+                        tint = if (isConnected) Mint else Warm
                     )
                     Spacer(Modifier.width(12.dp))
                     Text(
@@ -676,7 +684,7 @@ private fun TrustedDeviceCard(
                 onClick = onDisconnect,
                 modifier = Modifier.fillMaxWidth().height(52.dp),
                 shape = RoundedCornerShape(18.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                colors = ButtonDefaults.buttonColors(containerColor = Coral)
             ) {
                 Text("Forget this PC", fontWeight = FontWeight.Bold)
             }

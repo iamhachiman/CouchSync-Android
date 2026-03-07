@@ -17,23 +17,36 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.PrintWriter
+import java.net.Inet4Address
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.Socket
 import java.nio.charset.StandardCharsets
+import java.util.Collections
 
 object CouchSyncState {
     val isConnected = mutableStateOf(false)
     val isConnecting = mutableStateOf(false)
     val statusMessage = mutableStateOf("Scan your PC to pair")
 }
+
+private data class HandshakeConnection(
+    val socket: Socket,
+    val writer: PrintWriter,
+    val reader: BufferedReader,
+    val resolvedIp: String
+)
+
+private class PairRejectedException : Exception()
 
 class NotificationRelayService : NotificationListenerService() {
     private var socket: Socket? = null
@@ -57,6 +70,8 @@ class NotificationRelayService : NotificationListenerService() {
         private const val TAG = "CS_DEBUG"
         private const val CHANNEL_ID = "couchsync_bg_channel"
         private const val FOREGROUND_ID = 7531
+        private const val CONNECT_TIMEOUT_MS = 2500
+        private const val HANDSHAKE_TIMEOUT_MS = 3000
     }
 
     override fun onCreate() {
@@ -194,49 +209,23 @@ class NotificationRelayService : NotificationListenerService() {
             pushState(connected = false, connecting = true, status = "Connecting to $deviceName")
             try {
                 closeSocket()
-                val nextSocket = Socket().apply {
-                    tcpNoDelay = true
-                    keepAlive = true
-                }
-                nextSocket.connect(InetSocketAddress(ip, port), 3_000)
-                val nextWriter = PrintWriter(nextSocket.getOutputStream(), true, StandardCharsets.UTF_8)
-                val reader = BufferedReader(InputStreamReader(nextSocket.getInputStream(), StandardCharsets.UTF_8))
-                val pairRequest = JSONObject().apply {
-                    put("type", "pair")
-                    put("code", code)
-                    put("deviceName", buildPhoneName())
-                }
-                nextWriter.println(pairRequest.toString())
-                if (nextWriter.checkError()) {
-                    error("Unable to send pairing handshake")
+                val connection = connectKnownOrDiscover() ?: error("Server not reachable")
+                socket = connection.socket
+                writer = connection.writer
+                reconnectAttempt = 0
+
+                if (connection.resolvedIp != ip) {
+                    persistResolvedIp(connection.resolvedIp)
                 }
 
-                val handshake = withTimeoutOrNull(5_000) {
-                    var line: String?
-                    do {
-                        line = reader.readLine()
-                    } while (line != null && line.isBlank())
-                    line
-                } ?: error("Pairing handshake timed out")
-
-                val handshakeJson = JSONObject(handshake)
-                when (handshakeJson.optString("type")) {
-                    "paired" -> {
-                        socket = nextSocket
-                        writer = nextWriter
-                        reconnectAttempt = 0
-                        pushState(connected = true, connecting = false, status = "Connected to $deviceName")
-                        updateForegroundState()
-                        startReaderLoop(reader)
-                        syncHistoricNotifications()
-                    }
-                    "rejected" -> {
-                        allowReconnect = false
-                        closeSocket(nextSocket)
-                        pushState(connected = false, connecting = false, status = "Pairing rejected. Scan the Windows QR code again")
-                    }
-                    else -> error("Unexpected pairing response")
-                }
+                pushState(connected = true, connecting = false, status = "Connected to $deviceName")
+                updateForegroundState()
+                startReaderLoop(connection.reader)
+                syncHistoricNotifications()
+            } catch (_: PairRejectedException) {
+                allowReconnect = false
+                disconnect(manual = false)
+                pushState(connected = false, connecting = false, status = "Pairing expired. Scan the Windows QR code again")
             } catch (error: Exception) {
                 Log.e(TAG, "connectToServer failed: ${error.message}", error)
                 disconnect(manual = false)
@@ -245,6 +234,113 @@ class NotificationRelayService : NotificationListenerService() {
                 isConnectingSocket = false
             }
         }
+    }
+
+    private suspend fun connectKnownOrDiscover(): HandshakeConnection? {
+        val currentIp = ip ?: return null
+        attemptHandshake(currentIp, CONNECT_TIMEOUT_MS, HANDSHAKE_TIMEOUT_MS)?.let { return it }
+
+        pushState(connected = false, connecting = true, status = "Searching your current network for $deviceName")
+        return discoverServerOnCurrentSubnet()
+    }
+
+    private suspend fun discoverServerOnCurrentSubnet(): HandshakeConnection? {
+        val localIp = getCurrentIpv4Address() ?: return null
+        val prefix = localIp.substringBeforeLast('.', missingDelimiterValue = "")
+        if (prefix.isBlank()) {
+            return null
+        }
+
+        val preferredLastOctet = ip?.substringAfterLast('.', "")?.toIntOrNull()
+        val localLastOctet = localIp.substringAfterLast('.', "")
+        val baseCandidates = (1..254)
+            .filter { it.toString() != localLastOctet }
+            .filter { it != preferredLastOctet }
+
+        val orderedCandidates = buildList {
+            if (preferredLastOctet != null && preferredLastOctet in 1..254 && preferredLastOctet.toString() != localLastOctet) {
+                add(preferredLastOctet)
+            }
+            addAll(baseCandidates)
+        }.map { "$prefix.$it" }
+
+        orderedCandidates.chunked(20).forEach { chunk ->
+            val results = chunk.map { candidateIp ->
+                serviceScope.async {
+                    attemptHandshake(candidateIp, 350, 650)
+                }
+            }.awaitAll()
+
+            results.firstOrNull()?.let { found ->
+                pushState(connected = false, connecting = true, status = "Found $deviceName on ${found.resolvedIp}")
+                return found
+            }
+        }
+
+        return null
+    }
+
+    private fun attemptHandshake(targetIp: String, connectTimeoutMs: Int, readTimeoutMs: Int): HandshakeConnection? {
+        val pairingCode = code ?: return null
+        val attemptSocket = Socket().apply {
+            tcpNoDelay = true
+            keepAlive = true
+            soTimeout = readTimeoutMs
+        }
+
+        try {
+            attemptSocket.connect(InetSocketAddress(targetIp, port), connectTimeoutMs)
+            val attemptWriter = PrintWriter(attemptSocket.getOutputStream(), true, StandardCharsets.UTF_8)
+            val attemptReader = BufferedReader(InputStreamReader(attemptSocket.getInputStream(), StandardCharsets.UTF_8))
+            val pairRequest = JSONObject().apply {
+                put("type", "pair")
+                put("code", pairingCode)
+                put("deviceName", buildPhoneName())
+            }
+            attemptWriter.println(pairRequest.toString())
+            if (attemptWriter.checkError()) {
+                attemptSocket.close()
+                return null
+            }
+
+            var line: String?
+            do {
+                line = attemptReader.readLine()
+            } while (line != null && line.isBlank())
+
+            if (line.isNullOrBlank()) {
+                attemptSocket.close()
+                return null
+            }
+
+            return when (JSONObject(line).optString("type")) {
+                "paired" -> HandshakeConnection(attemptSocket, attemptWriter, attemptReader, targetIp)
+                "rejected" -> {
+                    attemptSocket.close()
+                    throw PairRejectedException()
+                }
+                else -> {
+                    attemptSocket.close()
+                    null
+                }
+            }
+        } catch (_: PairRejectedException) {
+            throw PairRejectedException()
+        } catch (_: Exception) {
+            try {
+                attemptSocket.close()
+            } catch (_: Exception) {
+            }
+            return null
+        }
+    }
+
+    private fun persistResolvedIp(resolvedIp: String) {
+        ip = resolvedIp
+        getSharedPreferences("CouchSyncPrefs", Context.MODE_PRIVATE)
+            .edit()
+            .putString("ip", resolvedIp)
+            .apply()
     }
 
     private fun startReaderLoop(reader: BufferedReader) {
@@ -469,5 +565,19 @@ class NotificationRelayService : NotificationListenerService() {
             .filter { it.isNotBlank() }
             .joinToString(" ")
             .ifBlank { "Android phone" }
+    }
+
+    private fun getCurrentIpv4Address(): String? {
+        return try {
+            Collections.list(NetworkInterface.getNetworkInterfaces())
+                .asSequence()
+                .filter { it.isUp && !it.isLoopback }
+                .flatMap { networkInterface -> Collections.list(networkInterface.inetAddresses).asSequence() }
+                .filterIsInstance<Inet4Address>()
+                .firstOrNull { !it.isLoopbackAddress }
+                ?.hostAddress
+        } catch (_: Exception) {
+            null
+        }
     }
 }
