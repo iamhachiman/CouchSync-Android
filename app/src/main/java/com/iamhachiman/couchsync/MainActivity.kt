@@ -82,7 +82,8 @@ data class PairingPrefs(
     val port: Int = 50505,
     val code: String = "",
     val deviceName: String = "Windows PC",
-    val runInBackground: Boolean = false
+    val runInBackground: Boolean = false,
+    val syncClipboard: Boolean = true
 ) {
     val isPaired: Boolean
         get() = ip.isNotBlank() && code.isNotBlank()
@@ -95,12 +96,14 @@ data class PairingPrefs(
             } else {
                 false
             }
+            val syncClipboard = sharedPrefs.getBoolean("sync_clipboard", true)
             return PairingPrefs(
                 ip = sharedPrefs.getString("ip", "").orEmpty(),
                 port = storedPort,
                 code = sharedPrefs.getString("code", "").orEmpty(),
                 deviceName = sharedPrefs.getString("device_name", "Windows PC").orEmpty().ifBlank { "Windows PC" },
-                runInBackground = runInBackground
+                runInBackground = runInBackground,
+                syncClipboard = syncClipboard
             )
         }
     }
@@ -164,6 +167,13 @@ class MainActivity : ComponentActivity() {
                         onPermissionClick = { promptNotificationPermission() },
                         onSaveManual = { ip, port, code -> savePairingToPrefs(ip, port, code, prefs.deviceName) },
                         onRunBgChange = { checkAndChangeRunBg(it) },
+                        onSyncClipboardChange = { enable ->
+                            sharedPrefs.edit().putBoolean("sync_clipboard", enable).apply()
+                            pairingPrefs.value = PairingPrefs.load(sharedPrefs)
+                            startService(Intent(this@MainActivity, NotificationRelayService::class.java).apply {
+                                action = "com.iamhachiman.couchsync.UPDATE_CLIPBOARD_SYNC"
+                            })
+                        },
                         onDisconnect = { disconnectPairing() },
                         isNotificationEnabled = isNotifEnabled.value,
                         onRequestBattery = { promptBatteryOptimization() },
@@ -324,6 +334,7 @@ fun CouchSyncMainScreen(
     onPermissionClick: () -> Unit,
     onSaveManual: (String, Int, String) -> Unit,
     onRunBgChange: (Boolean) -> Unit,
+    onSyncClipboardChange: (Boolean) -> Unit,
     onDisconnect: () -> Unit,
     isNotificationEnabled: Boolean,
     onRequestBattery: () -> Unit,
@@ -410,6 +421,7 @@ fun CouchSyncMainScreen(
                     pairingPrefs = pairingPrefs,
                     isConnected = isConnected,
                     onRunBgChange = onRunBgChange,
+                    onSyncClipboardChange = onSyncClipboardChange,
                     onDisconnect = onDisconnect
                 )
             }
@@ -608,6 +620,7 @@ private fun TrustedDeviceCard(
     pairingPrefs: PairingPrefs,
     isConnected: Boolean,
     onRunBgChange: (Boolean) -> Unit,
+    onSyncClipboardChange: (Boolean) -> Unit,
     onDisconnect: () -> Unit
 ) {
     Card(
@@ -647,6 +660,29 @@ private fun TrustedDeviceCard(
                 Switch(
                     checked = pairingPrefs.runInBackground,
                     onCheckedChange = onRunBgChange,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.White,
+                        checkedTrackColor = MaterialTheme.colorScheme.primary
+                    )
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Sync Clipboard", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Share copied text between phone and PC.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 13.sp
+                    )
+                }
+                Spacer(Modifier.width(16.dp))
+                Switch(
+                    checked = pairingPrefs.syncClipboard,
+                    onCheckedChange = onSyncClipboardChange,
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = Color.White,
                         checkedTrackColor = MaterialTheme.colorScheme.primary

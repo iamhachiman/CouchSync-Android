@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -38,6 +39,7 @@ object CouchSyncState {
     val isConnected = mutableStateOf(false)
     val isConnecting = mutableStateOf(false)
     val statusMessage = mutableStateOf("Scan your PC to pair")
+    val isClipboardSyncEnabled = mutableStateOf(false)
 }
 
 private data class HandshakeConnection(
@@ -75,8 +77,36 @@ class NotificationRelayService : NotificationListenerService() {
         private const val HANDSHAKE_TIMEOUT_MS = 3000
     }
 
+    private var clipboardManager: ClipboardManager? = null
+    private var lastClipboardText: String? = null
+    private var isHandlingIncomingClipboard = false
+
+    private val clipboardListener = ClipboardManager.OnPrimaryClipChangedListener {
+        if (!CouchSyncState.isClipboardSyncEnabled.value) return@OnPrimaryClipChangedListener
+        if (isHandlingIncomingClipboard) return@OnPrimaryClipChangedListener
+
+        try {
+            val clip = clipboardManager?.primaryClip
+            if (clip != null && clip.itemCount > 0) {
+                val text = clip.getItemAt(0).text?.toString()
+                if (!text.isNullOrBlank() && text != lastClipboardText && isSocketReady()) {
+                    lastClipboardText = text
+                    val payload = JSONObject().apply {
+                        put("type", "clipboard")
+                        put("text", text)
+                    }
+                    synchronized(this@NotificationRelayService) {
+                        writer?.println(payload.toString())
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
     override fun onCreate() {
         super.onCreate()
+        clipboardManager = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboardManager?.addPrimaryClipChangedListener(clipboardListener)
         loadPrefs()
         updateForegroundState()
         connectToServer(force = true)
@@ -103,6 +133,9 @@ class NotificationRelayService : NotificationListenerService() {
                 if (allowReconnect) {
                     connectToServer(force = false)
                 }
+            }
+            "com.iamhachiman.couchsync.UPDATE_CLIPBOARD_SYNC" -> {
+                loadPrefs()
             }
         }
         return super.onStartCommand(intent, flags, startId)
@@ -131,6 +164,8 @@ class NotificationRelayService : NotificationListenerService() {
         code = prefs.getString("code", null)
         deviceName = prefs.getString("device_name", "Windows PC").orEmpty().ifBlank { "Windows PC" }
         isRunInBg = prefs.getBoolean("run_in_background", false)
+        CouchSyncState.isClipboardSyncEnabled.value = prefs.getBoolean("sync_clipboard", true)
+
         if (ip.isNullOrBlank() || code.isNullOrBlank() || port == 0) {
             pushState(connected = false, connecting = false, status = "Scan your PC to pair")
         } else if (!isSocketReady() && !isConnectingSocket) {
@@ -370,6 +405,14 @@ class NotificationRelayService : NotificationListenerService() {
                                 cancelNotification(key)
                             }
                         }
+                        "clipboard" -> {
+                            if (CouchSyncState.isClipboardSyncEnabled.value) {
+                                val text = payload.optString("text")
+                                if (text.isNotBlank() && text != lastClipboardText) {
+                                    handleIncomingClipboard(text)
+                                }
+                            }
+                        }
                     }
                 }
             } catch (error: Exception) {
@@ -540,7 +583,24 @@ class NotificationRelayService : NotificationListenerService() {
         }
     }
 
+    private fun handleIncomingClipboard(text: String) {
+        serviceScope.launch(Dispatchers.Main) {
+            try {
+                isHandlingIncomingClipboard = true
+                lastClipboardText = text
+                val clip = android.content.ClipData.newPlainText("CouchSync", text)
+                clipboardManager?.setPrimaryClip(clip)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed setting clipboard", e)
+            } finally {
+                delay(300)
+                isHandlingIncomingClipboard = false
+            }
+        }
+    }
+
     override fun onDestroy() {
+        clipboardManager?.removePrimaryClipChangedListener(clipboardListener)
         pingJob?.cancel()
         reconnectJob?.cancel()
         readerJob?.cancel()
