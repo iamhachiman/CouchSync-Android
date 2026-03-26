@@ -75,39 +75,35 @@ class NotificationRelayService : NotificationListenerService() {
         private const val FOREGROUND_ID = 7531
         private const val CONNECT_TIMEOUT_MS = 2500
         private const val HANDSHAKE_TIMEOUT_MS = 3000
+
+        const val ACTION_CONNECT = "com.iamhachiman.couchsync.CONNECT"
+        const val ACTION_DISCONNECT = "com.iamhachiman.couchsync.DISCONNECT"
+        const val ACTION_UPDATE_BG = "com.iamhachiman.couchsync.UPDATE_BG"
+        const val ACTION_UPDATE_CLIPBOARD_SYNC = "com.iamhachiman.couchsync.UPDATE_CLIPBOARD_SYNC"
+        const val ACTION_APP_FOREGROUND = "com.iamhachiman.couchsync.APP_FOREGROUND"
+        const val ACTION_APP_BACKGROUND = "com.iamhachiman.couchsync.APP_BACKGROUND"
+        const val ACTION_PUSH_CLIPBOARD_TEXT = "com.iamhachiman.couchsync.PUSH_CLIPBOARD_TEXT"
+
+        const val EXTRA_CLIPBOARD_TEXT = "extra_clipboard_text"
     }
 
     private var clipboardManager: ClipboardManager? = null
-    private var lastClipboardText: String? = null
+    private var lastClipboardTextSentToPc: String? = null
+    private var lastClipboardTextAppliedFromPc: String? = null
+    private var pendingClipboardText: String? = null
     private var isHandlingIncomingClipboard = false
+    private var isUiForeground = false
+    private var isClipboardListenerRegistered = false
 
     private val clipboardListener = ClipboardManager.OnPrimaryClipChangedListener {
-        if (!CouchSyncState.isClipboardSyncEnabled.value) return@OnPrimaryClipChangedListener
-        if (isHandlingIncomingClipboard) return@OnPrimaryClipChangedListener
-
-        try {
-            val clip = clipboardManager?.primaryClip
-            if (clip != null && clip.itemCount > 0) {
-                val text = clip.getItemAt(0).text?.toString()
-                if (!text.isNullOrBlank() && text != lastClipboardText && isSocketReady()) {
-                    lastClipboardText = text
-                    val payload = JSONObject().apply {
-                        put("type", "clipboard")
-                        put("text", text)
-                    }
-                    synchronized(this@NotificationRelayService) {
-                        writer?.println(payload.toString())
-                    }
-                }
-            }
-        } catch (_: Exception) {}
+        pushClipboardToPcFromPhoneClipboard()
     }
 
     override fun onCreate() {
         super.onCreate()
         clipboardManager = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboardManager?.addPrimaryClipChangedListener(clipboardListener)
         loadPrefs()
+        updateClipboardListenerRegistration()
         updateForegroundState()
         connectToServer(force = true)
         startPingLoop()
@@ -115,27 +111,43 @@ class NotificationRelayService : NotificationListenerService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            "com.iamhachiman.couchsync.CONNECT" -> {
+            ACTION_CONNECT -> {
                 allowReconnect = true
                 loadPrefs()
                 updateForegroundState()
                 connectToServer(force = true)
             }
-            "com.iamhachiman.couchsync.DISCONNECT" -> {
+            ACTION_DISCONNECT -> {
                 allowReconnect = false
                 reconnectJob?.cancel()
                 disconnect(manual = true)
                 stopForeground(true)
             }
-            "com.iamhachiman.couchsync.UPDATE_BG" -> {
+            ACTION_UPDATE_BG -> {
                 loadPrefs()
                 updateForegroundState()
                 if (allowReconnect) {
                     connectToServer(force = false)
                 }
             }
-            "com.iamhachiman.couchsync.UPDATE_CLIPBOARD_SYNC" -> {
+            ACTION_UPDATE_CLIPBOARD_SYNC -> {
                 loadPrefs()
+            }
+            ACTION_APP_FOREGROUND -> {
+                isUiForeground = true
+                updateClipboardListenerRegistration()
+                pushClipboardToPcFromPhoneClipboard()
+            }
+            ACTION_APP_BACKGROUND -> {
+                isUiForeground = false
+                updateClipboardListenerRegistration()
+            }
+            ACTION_PUSH_CLIPBOARD_TEXT -> {
+                val text = intent.getStringExtra(EXTRA_CLIPBOARD_TEXT).orEmpty()
+                if (text.isNotBlank()) {
+                    Log.d(TAG, "Received explicit clipboard push request")
+                    sendClipboardToPc(text, force = true)
+                }
             }
         }
         return super.onStartCommand(intent, flags, startId)
@@ -165,6 +177,7 @@ class NotificationRelayService : NotificationListenerService() {
         deviceName = prefs.getString("device_name", "Windows PC").orEmpty().ifBlank { "Windows PC" }
         isRunInBg = prefs.getBoolean("run_in_background", false)
         CouchSyncState.isClipboardSyncEnabled.value = prefs.getBoolean("sync_clipboard", true)
+        updateClipboardListenerRegistration()
 
         if (ip.isNullOrBlank() || code.isNullOrBlank() || port == 0) {
             pushState(connected = false, connecting = false, status = "Scan your PC to pair")
@@ -257,6 +270,7 @@ class NotificationRelayService : NotificationListenerService() {
                 pushState(connected = true, connecting = false, status = "Connected to $deviceName")
                 updateForegroundState()
                 startReaderLoop(connection.reader)
+                flushPendingClipboardToPc()
                 syncHistoricNotifications()
             } catch (_: PairRejectedException) {
                 allowReconnect = false
@@ -408,7 +422,8 @@ class NotificationRelayService : NotificationListenerService() {
                         "clipboard" -> {
                             if (CouchSyncState.isClipboardSyncEnabled.value) {
                                 val text = payload.optString("text")
-                                if (text.isNotBlank() && text != lastClipboardText) {
+                                if (text.isNotBlank() && text != lastClipboardTextAppliedFromPc) {
+                                    Log.d(TAG, "Received clipboard from PC (${text.length} chars)")
                                     handleIncomingClipboard(text)
                                 }
                             }
@@ -587,9 +602,12 @@ class NotificationRelayService : NotificationListenerService() {
         serviceScope.launch(Dispatchers.Main) {
             try {
                 isHandlingIncomingClipboard = true
-                lastClipboardText = text
+                // Track both directions so this incoming write does not bounce back to PC.
+                lastClipboardTextAppliedFromPc = text
+                lastClipboardTextSentToPc = text
                 val clip = android.content.ClipData.newPlainText("CouchSync", text)
                 clipboardManager?.setPrimaryClip(clip)
+                Log.d(TAG, "Applied clipboard from PC to phone")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed setting clipboard", e)
             } finally {
@@ -599,8 +617,80 @@ class NotificationRelayService : NotificationListenerService() {
         }
     }
 
+    private fun updateClipboardListenerRegistration() {
+        val shouldListen = CouchSyncState.isClipboardSyncEnabled.value && isUiForeground
+        if (shouldListen == isClipboardListenerRegistered) {
+            return
+        }
+
+        if (shouldListen) {
+            clipboardManager?.addPrimaryClipChangedListener(clipboardListener)
+            isClipboardListenerRegistered = true
+        } else {
+            clipboardManager?.removePrimaryClipChangedListener(clipboardListener)
+            isClipboardListenerRegistered = false
+        }
+    }
+
+    private fun pushClipboardToPcFromPhoneClipboard() {
+        if (!CouchSyncState.isClipboardSyncEnabled.value) return
+        if (isHandlingIncomingClipboard) return
+        if (!isSocketReady()) return
+
+        try {
+            val clip = clipboardManager?.primaryClip ?: return
+            if (clip.itemCount <= 0) return
+
+            val text = clip.getItemAt(0).text?.toString()
+            if (!text.isNullOrBlank()) {
+                sendClipboardToPc(text, force = false)
+            }
+        } catch (error: SecurityException) {
+            Log.w(TAG, "Clipboard read blocked by Android while app is not in focus", error)
+        } catch (error: Exception) {
+            Log.e(TAG, "Clipboard sync read failed: ${error.message}", error)
+        }
+    }
+
+    private fun sendClipboardToPc(text: String, force: Boolean) {
+        if (!CouchSyncState.isClipboardSyncEnabled.value) return
+        if (!force && text == lastClipboardTextSentToPc) return
+
+        if (!isSocketReady()) {
+            pendingClipboardText = text
+            connectToServer(force = false)
+            Log.d(TAG, "Queued clipboard for send after reconnect (${text.length} chars)")
+            return
+        }
+
+        lastClipboardTextSentToPc = text
+        val payload = JSONObject().apply {
+            put("type", "clipboard")
+            put("text", text)
+        }
+
+        synchronized(this@NotificationRelayService) {
+            writer?.println(payload.toString())
+            if (writer?.checkError() == true) {
+                disconnect(manual = false)
+                scheduleReconnect("Trying again soon")
+            } else {
+                pendingClipboardText = null
+                Log.d(TAG, "Clipboard pushed to PC (${text.length} chars)")
+            }
+        }
+    }
+
+    private fun flushPendingClipboardToPc() {
+        val pending = pendingClipboardText ?: return
+        sendClipboardToPc(pending, force = true)
+    }
+
     override fun onDestroy() {
-        clipboardManager?.removePrimaryClipChangedListener(clipboardListener)
+        if (isClipboardListenerRegistered) {
+            clipboardManager?.removePrimaryClipChangedListener(clipboardListener)
+            isClipboardListenerRegistered = false
+        }
         pingJob?.cancel()
         reconnectJob?.cancel()
         readerJob?.cancel()

@@ -1,6 +1,7 @@
 package com.iamhachiman.couchsync
 
 import android.Manifest
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
@@ -111,6 +112,7 @@ data class PairingPrefs(
 
 class MainActivity : ComponentActivity() {
     private lateinit var sharedPrefs: SharedPreferences
+    private lateinit var clipboardManager: ClipboardManager
     private val isNotifEnabled = mutableStateOf(false)
     private val isBattOptimized = mutableStateOf(false)
     private val pairingPrefs = mutableStateOf(PairingPrefs())
@@ -142,6 +144,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         sharedPrefs = getSharedPreferences("CouchSyncPrefs", Context.MODE_PRIVATE)
+        clipboardManager = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         sharedPrefs.registerOnSharedPreferenceChangeListener(sharedPrefsListener)
 
         enableEdgeToEdge()
@@ -171,9 +174,10 @@ class MainActivity : ComponentActivity() {
                             sharedPrefs.edit().putBoolean("sync_clipboard", enable).apply()
                             pairingPrefs.value = PairingPrefs.load(sharedPrefs)
                             startService(Intent(this@MainActivity, NotificationRelayService::class.java).apply {
-                                action = "com.iamhachiman.couchsync.UPDATE_CLIPBOARD_SYNC"
+                                action = NotificationRelayService.ACTION_UPDATE_CLIPBOARD_SYNC
                             })
                         },
+                        onSendClipboardNow = { pushCurrentClipboardToPc(showFeedback = true) },
                         onDisconnect = { disconnectPairing() },
                         isNotificationEnabled = isNotifEnabled.value,
                         onRequestBattery = { promptBatteryOptimization() },
@@ -187,7 +191,18 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         refreshStates()
+        startService(Intent(this, NotificationRelayService::class.java).apply {
+            action = NotificationRelayService.ACTION_APP_FOREGROUND
+        })
+        pushCurrentClipboardToPc(showFeedback = false)
         resumeHandler.postDelayed({ refreshStates() }, 350)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        startService(Intent(this, NotificationRelayService::class.java).apply {
+            action = NotificationRelayService.ACTION_APP_BACKGROUND
+        })
     }
 
     override fun onDestroy() {
@@ -252,7 +267,7 @@ class MainActivity : ComponentActivity() {
         CouchSyncState.statusMessage.value = "Connecting to ${deviceName.ifBlank { cleanIp }}"
 
         startService(Intent(this, NotificationRelayService::class.java).apply {
-            action = "com.iamhachiman.couchsync.CONNECT"
+            action = NotificationRelayService.ACTION_CONNECT
         })
     }
 
@@ -266,7 +281,7 @@ class MainActivity : ComponentActivity() {
         }
         pairingPrefs.value = PairingPrefs.load(sharedPrefs)
         startService(Intent(this, NotificationRelayService::class.java).apply {
-            action = "com.iamhachiman.couchsync.DISCONNECT"
+            action = NotificationRelayService.ACTION_DISCONNECT
         })
     }
 
@@ -274,7 +289,7 @@ class MainActivity : ComponentActivity() {
         sharedPrefs.edit().putBoolean("run_in_background", enabled).apply()
         pairingPrefs.value = PairingPrefs.load(sharedPrefs)
         startService(Intent(this, NotificationRelayService::class.java).apply {
-            action = "com.iamhachiman.couchsync.UPDATE_BG"
+            action = NotificationRelayService.ACTION_UPDATE_BG
         })
     }
 
@@ -321,6 +336,51 @@ class MainActivity : ComponentActivity() {
             data = Uri.parse("package:$packageName")
         })
     }
+
+    private fun pushCurrentClipboardToPc(showFeedback: Boolean) {
+        val prefs = pairingPrefs.value
+        if (!prefs.syncClipboard || !prefs.isPaired) {
+            if (showFeedback) {
+                Toast.makeText(this, "Clipboard sync is off or device is not paired", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+
+        try {
+            val clip = clipboardManager.primaryClip
+            if (clip == null || clip.itemCount == 0) {
+                if (showFeedback) {
+                    Toast.makeText(this, "Clipboard is empty", Toast.LENGTH_SHORT).show()
+                }
+                return
+            }
+
+            val text = clip.getItemAt(0).coerceToText(this)?.toString().orEmpty()
+            if (text.isBlank()) {
+                if (showFeedback) {
+                    Toast.makeText(this, "Clipboard has no text", Toast.LENGTH_SHORT).show()
+                }
+                return
+            }
+
+            startService(Intent(this, NotificationRelayService::class.java).apply {
+                action = NotificationRelayService.ACTION_PUSH_CLIPBOARD_TEXT
+                putExtra(NotificationRelayService.EXTRA_CLIPBOARD_TEXT, text)
+            })
+
+            if (showFeedback) {
+                Toast.makeText(this, "Sent clipboard to PC", Toast.LENGTH_SHORT).show()
+            }
+        } catch (_: SecurityException) {
+            if (showFeedback) {
+                Toast.makeText(this, "Android blocked clipboard access right now", Toast.LENGTH_SHORT).show()
+            }
+        } catch (_: Exception) {
+            if (showFeedback) {
+                Toast.makeText(this, "Failed to send clipboard", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -335,6 +395,7 @@ fun CouchSyncMainScreen(
     onSaveManual: (String, Int, String) -> Unit,
     onRunBgChange: (Boolean) -> Unit,
     onSyncClipboardChange: (Boolean) -> Unit,
+    onSendClipboardNow: () -> Unit,
     onDisconnect: () -> Unit,
     isNotificationEnabled: Boolean,
     onRequestBattery: () -> Unit,
@@ -422,6 +483,7 @@ fun CouchSyncMainScreen(
                     isConnected = isConnected,
                     onRunBgChange = onRunBgChange,
                     onSyncClipboardChange = onSyncClipboardChange,
+                    onSendClipboardNow = onSendClipboardNow,
                     onDisconnect = onDisconnect
                 )
             }
@@ -621,6 +683,7 @@ private fun TrustedDeviceCard(
     isConnected: Boolean,
     onRunBgChange: (Boolean) -> Unit,
     onSyncClipboardChange: (Boolean) -> Unit,
+    onSendClipboardNow: () -> Unit,
     onDisconnect: () -> Unit
 ) {
     Card(
@@ -674,7 +737,7 @@ private fun TrustedDeviceCard(
                 Column(modifier = Modifier.weight(1f)) {
                     Text("Sync Clipboard", fontWeight = FontWeight.SemiBold)
                     Text(
-                        "Share copied text between phone and PC.",
+                        "Phone to PC sync is sent when CouchSync is open (Android blocks background clipboard reads).",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 13.sp
                     )
@@ -688,6 +751,13 @@ private fun TrustedDeviceCard(
                         checkedTrackColor = MaterialTheme.colorScheme.primary
                     )
                 )
+            }
+            OutlinedButton(
+                onClick = onSendClipboardNow,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Text("Send current phone clipboard to PC")
             }
             Card(
                 shape = RoundedCornerShape(20.dp),
