@@ -57,7 +57,9 @@ class NotificationRelayService : NotificationListenerService() {
     private var readerJob: Job? = null
     private var reconnectJob: Job? = null
     private var pingJob: Job? = null
+    private var safetySyncJob: Job? = null
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val sentNotificationSignatures = LinkedHashMap<String, String>()
 
     private var ip: String? = null
     private var port: Int = 0
@@ -75,6 +77,8 @@ class NotificationRelayService : NotificationListenerService() {
         private const val FOREGROUND_ID = 7531
         private const val CONNECT_TIMEOUT_MS = 2500
         private const val HANDSHAKE_TIMEOUT_MS = 3000
+        private const val SAFETY_SYNC_INTERVAL_MS = 15_000L
+        private const val MAX_NOTIFICATION_SIGNATURE_CACHE = 600
 
         const val ACTION_CONNECT = "com.iamhachiman.couchsync.CONNECT"
         const val ACTION_DISCONNECT = "com.iamhachiman.couchsync.DISCONNECT"
@@ -107,6 +111,7 @@ class NotificationRelayService : NotificationListenerService() {
         updateForegroundState()
         connectToServer(force = true)
         startPingLoop()
+        startSafetyNotificationSyncLoop()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -508,6 +513,31 @@ class NotificationRelayService : NotificationListenerService() {
         }
     }
 
+    private fun startSafetyNotificationSyncLoop() {
+        if (safetySyncJob?.isActive == true) {
+            return
+        }
+
+        safetySyncJob = serviceScope.launch {
+            while (true) {
+                delay(SAFETY_SYNC_INTERVAL_MS)
+
+                if (!allowReconnect || !isListenerBound || !isSocketReady()) {
+                    continue
+                }
+
+                try {
+                    val snapshot = activeNotifications ?: continue
+                    snapshot.forEach { notification ->
+                        sendJsonDirect(notification, historic = false)
+                    }
+                } catch (error: Exception) {
+                    Log.w(TAG, "Safety sync failed: ${error.message}")
+                }
+            }
+        }
+    }
+
     private suspend fun syncHistoricNotifications() {
         if (!isListenerBound || !isSocketReady()) {
             return
@@ -528,6 +558,8 @@ class NotificationRelayService : NotificationListenerService() {
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
+        sentNotificationSignatures.remove(sbn.key)
+
         val extras = sbn.notification.extras
         val title = extras.getCharSequence("android.title")?.toString().orEmpty()
         val text = extras.getCharSequence("android.text")?.toString().orEmpty()
@@ -566,10 +598,17 @@ class NotificationRelayService : NotificationListenerService() {
         if (sbn.isOngoing || !isSocketReady()) {
             return
         }
+
+        val notificationKey = sbn.key
         val extras = sbn.notification.extras
         val title = extras.getCharSequence("android.title")?.toString().orEmpty()
         val text = extras.getCharSequence("android.text")?.toString().orEmpty()
         if (title.isBlank() && text.isBlank()) {
+            return
+        }
+
+        val signature = "${sbn.packageName}|$title|$text"
+        if (!historic && sentNotificationSignatures[notificationKey] == signature) {
             return
         }
 
@@ -579,7 +618,7 @@ class NotificationRelayService : NotificationListenerService() {
                 put("app", getAppName(sbn.packageName))
                 put("title", title)
                 put("text", text)
-                put("key", sbn.key)
+                put("key", notificationKey)
                 if (historic) {
                     put("historic", true)
                 }
@@ -589,12 +628,22 @@ class NotificationRelayService : NotificationListenerService() {
                 if (writer?.checkError() == true) {
                     disconnect(manual = false)
                     scheduleReconnect("Trying again soon")
+                } else if (!historic) {
+                    sentNotificationSignatures[notificationKey] = signature
+                    trimNotificationSignatureCache()
                 }
             }
         } catch (error: Exception) {
             Log.e(TAG, "notification send failed: ${error.message}", error)
             disconnect(manual = false)
             scheduleReconnect("Trying again soon")
+        }
+    }
+
+    private fun trimNotificationSignatureCache() {
+        while (sentNotificationSignatures.size > MAX_NOTIFICATION_SIGNATURE_CACHE) {
+            val oldestKey = sentNotificationSignatures.entries.firstOrNull()?.key ?: return
+            sentNotificationSignatures.remove(oldestKey)
         }
     }
 
@@ -691,6 +740,7 @@ class NotificationRelayService : NotificationListenerService() {
             clipboardManager?.removePrimaryClipChangedListener(clipboardListener)
             isClipboardListenerRegistered = false
         }
+        safetySyncJob?.cancel()
         pingJob?.cancel()
         reconnectJob?.cancel()
         readerJob?.cancel()
