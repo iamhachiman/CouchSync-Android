@@ -57,7 +57,6 @@ class NotificationRelayService : NotificationListenerService() {
     private var readerJob: Job? = null
     private var reconnectJob: Job? = null
     private var pingJob: Job? = null
-    private var safetySyncJob: Job? = null
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val sentNotificationSignatures = LinkedHashMap<String, String>()
 
@@ -77,7 +76,6 @@ class NotificationRelayService : NotificationListenerService() {
         private const val FOREGROUND_ID = 7531
         private const val CONNECT_TIMEOUT_MS = 2500
         private const val HANDSHAKE_TIMEOUT_MS = 3000
-        private const val SAFETY_SYNC_INTERVAL_MS = 15_000L
         private const val MAX_NOTIFICATION_SIGNATURE_CACHE = 600
 
         const val ACTION_CONNECT = "com.iamhachiman.couchsync.CONNECT"
@@ -111,7 +109,6 @@ class NotificationRelayService : NotificationListenerService() {
         updateForegroundState()
         connectToServer(force = true)
         startPingLoop()
-        startSafetyNotificationSyncLoop()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -513,31 +510,6 @@ class NotificationRelayService : NotificationListenerService() {
         }
     }
 
-    private fun startSafetyNotificationSyncLoop() {
-        if (safetySyncJob?.isActive == true) {
-            return
-        }
-
-        safetySyncJob = serviceScope.launch {
-            while (true) {
-                delay(SAFETY_SYNC_INTERVAL_MS)
-
-                if (!allowReconnect || !isListenerBound || !isSocketReady()) {
-                    continue
-                }
-
-                try {
-                    val snapshot = activeNotifications ?: continue
-                    snapshot.forEach { notification ->
-                        sendJsonDirect(notification, historic = false)
-                    }
-                } catch (error: Exception) {
-                    Log.w(TAG, "Safety sync failed: ${error.message}")
-                }
-            }
-        }
-    }
-
     private suspend fun syncHistoricNotifications() {
         if (!isListenerBound || !isSocketReady()) {
             return
@@ -740,7 +712,6 @@ class NotificationRelayService : NotificationListenerService() {
             clipboardManager?.removePrimaryClipChangedListener(clipboardListener)
             isClipboardListenerRegistered = false
         }
-        safetySyncJob?.cancel()
         pingJob?.cancel()
         reconnectJob?.cancel()
         readerJob?.cancel()
