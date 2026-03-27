@@ -59,6 +59,7 @@ class NotificationRelayService : NotificationListenerService() {
     private var pingJob: Job? = null
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val sentNotificationSignatures = LinkedHashMap<String, String>()
+    @Volatile private var needsHistoricResync: Boolean = false
 
     private var ip: String? = null
     private var port: Int = 0
@@ -274,6 +275,7 @@ class NotificationRelayService : NotificationListenerService() {
                 startReaderLoop(connection.reader)
                 flushPendingClipboardToPc()
                 syncHistoricNotifications()
+                needsHistoricResync = false
             } catch (_: PairRejectedException) {
                 allowReconnect = false
                 disconnect(manual = false)
@@ -567,7 +569,7 @@ class NotificationRelayService : NotificationListenerService() {
     }
 
     private fun sendJsonDirect(sbn: StatusBarNotification, historic: Boolean) {
-        if (sbn.isOngoing || !isSocketReady()) {
+        if (sbn.isOngoing) {
             return
         }
 
@@ -584,17 +586,26 @@ class NotificationRelayService : NotificationListenerService() {
             return
         }
 
-        try {
-            val payload = JSONObject().apply {
-                put("type", "notification")
-                put("app", getAppName(sbn.packageName))
-                put("title", title)
-                put("text", text)
-                put("key", notificationKey)
-                if (historic) {
-                    put("historic", true)
-                }
+        val payload = JSONObject().apply {
+            put("type", "notification")
+            put("app", getAppName(sbn.packageName))
+            put("title", title)
+            put("text", text)
+            put("key", notificationKey)
+            if (historic) {
+                put("historic", true)
             }
+        }
+
+        if (!isSocketReady()) {
+            if (!historic) {
+                needsHistoricResync = true
+                connectToServer(force = false)
+            }
+            return
+        }
+
+        try {
             synchronized(this@NotificationRelayService) {
                 writer?.println(payload.toString())
                 if (writer?.checkError() == true) {
